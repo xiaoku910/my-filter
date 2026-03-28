@@ -4,60 +4,62 @@ import cv2
 import numpy as np
 import os
 
-# 1. 基本設定
-st.set_page_config(page_title="孟克濾鏡-雲端流暢版")
-st.title("🎨 藝術濾鏡測試中")
+st.set_page_config(page_title="大師濾鏡-移植版", layout="centered")
 
-# 2. 強化版圖片讀取 (加入錯誤檢查提示)
+# --- 1. 完全保留你成功的讀取邏輯 ---
+# 加入 @st.cache_resource 是為了防止雲端主機每次都重新讀取圖片導致崩潰
 @st.cache_resource
-def load_filter_image():
-    # 這裡直接讀取，不處理中文路徑，因為 GitHub 伺服器路徑是英文的
-    path = "mask.png" 
-    if not os.path.exists(path):
-        return None
-    # 讀取並強制轉換為帶 Alpha 通道的內容
-    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-    return img
+def load_overlay():
+    def imread_unicode(path):
+        try:
+            data = np.fromfile(path, dtype=np.uint8)
+            img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+            return img
+        except Exception as e:
+            print(f"讀取錯誤: {e}")
+            return None
 
-overlay = load_filter_image()
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    mask_path = os.path.join(BASE_DIR, "mask.png")
+    return imread_unicode(mask_path)
+
+overlay = load_overlay()
 
 if overlay is None:
-    st.error("❌ 找不到 mask.png！請確認檔案有跟 app.py 放在 GitHub 同一個資料夾。")
+    st.error("❌ 錯誤：找不到 mask.png！請確認檔案有跟 app.py 放在一起。")
+    st.stop()
 else:
-    st.success("✅ 濾鏡素材讀取成功，請按下方 Start。")
+    st.success("✅ 濾鏡載入成功！請點擊下方 START 啟動相機。")
 
-# 3. 影像處理邏輯 (優化效能，防止卡在第一幀)
-def transform(frame):
+# --- 2. 把你的 while 迴圈內容，變成網頁專用的加工廠 ---
+def video_frame_callback(frame):
+    # 這裡相當於原本的 ret, frame = cap.read()
     img = frame.to_ndarray(format="bgr24")
-    
-    if overlay is not None:
-        # 取得目前相機畫面的寬高
-        h, w = img.shape[:2]
-        # 縮放濾鏡以匹配相機
-        mask_res = cv2.resize(overlay, (w, h))
 
-        if mask_res.shape[2] == 4: # PNG 有透明層
-            alpha = mask_res[:, :, 3] / 255.0
-            overlay_rgb = mask_res[:, :, :3]
-            # 使用快速疊加法，避免逐像素迴圈
-            img = (img * (1.0 - alpha[:, :, np.newaxis]) + 
-                   overlay_rgb * alpha[:, :, np.newaxis]).astype(np.uint8)
-        else:
-            # 如果是 JPG
-            img = cv2.addWeighted(img, 0.5, mask_res[:, :, :3], 0.5, 0)
+    h, w, _ = img.shape
+    mask_resized = cv2.resize(overlay, (w, h))
 
+    # --- 3. 完全照搬你成功的疊加邏輯 ---
+    if mask_resized.shape[2] == 4: # PNG 有透明層
+        alpha = mask_resized[:, :, 3] / 255.0
+        overlay_color = mask_resized[:, :, :3]
+        # 進行 BGR 疊加
+        for c in range(3):
+            img[:, :, c] = (img[:, :, c] * (1 - alpha) + overlay_color[:, :, c] * alpha).astype(np.uint8)
+    else: # 沒有透明層
+        img = cv2.addWeighted(img, 0.6, mask_resized[:, :, :3], 0.4, 0)
+
+    # 回傳處理好的畫面 (相當於原本的 cv2.imshow)
     return cv2.VideoFrame.from_ndarray(img, format="bgr24")
 
-# 4. 啟動 WebRTC (關鍵參數調整)
+# --- 4. 啟動網頁攝影機 (取代 cv2.VideoCapture) ---
 webrtc_streamer(
-    key="munch-cloud-final",
+    key="munch-web",
     mode=WebRtcMode.SENDRECV,
-    video_frame_callback=transform,
-    # 加入 STUN 伺服器
-    rtc_configuration={
-        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-    },
-    # 限制解析度以提升順暢度 (非常重要！)
+    video_frame_callback=video_frame_callback,
+    # 設定穿透伺服器，讓手機連得上
+    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+    # 稍微限制解析度，避免雲端免費主機資源超載 (Over memory limit)
     media_stream_constraints={
         "video": {
             "width": {"ideal": 640},
@@ -66,6 +68,5 @@ webrtc_streamer(
         },
         "audio": False
     },
-    # 讓影像處理跟顯示分開，防止卡死
-    async_processing=True,
+    async_processing=True, # 必須開啟，防止畫面卡在第一幀
 )
