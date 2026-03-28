@@ -1,64 +1,62 @@
+import streamlit as st
+from streamlit_webrtc import webrtc_streamer, WebRtcMode
 import cv2
 import numpy as np
 import os
 
-# --- 1. 解決中文路徑讀取問題 ---
+# 1. 頁面標題
+st.set_page_config(page_title="大師濾鏡-手機同步版")
+
+# --- 2. 保留你最成功的圖片讀取邏輯 ---
 def imread_unicode(path):
-    # 使用 numpy 讀取二進制數據，再解碼，這樣中文路徑就不會噴錯
     try:
+        # 雲端環境也適用這種讀取方式，最保險
         data = np.fromfile(path, dtype=np.uint8)
         img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
         return img
     except Exception as e:
-        print(f"讀取錯誤: {e}")
         return None
 
-# 定位檔案
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 mask_path = os.path.join(BASE_DIR, "mask.png")
-
-# 載入濾鏡
 overlay = imread_unicode(mask_path)
 
 if overlay is None:
-    print(f"❌ 錯誤：找不到或無法開啟 {mask_path}")
-    print("請確認 mask.png 是否真的在該資料夾下面。")
-    exit()
+    st.error(f"❌ 找不到濾鏡檔案 mask.png")
+    st.stop()
 
-# --- 2. 啟動相機 ---
-# 嘗試多個後端啟動相機，防止 FFMPEG 報錯
-cap = cv2.VideoCapture(0, cv2.CAP_DSHOW) 
-
-if not cap.isOpened():
-    print("❌ 錯誤：找不到攝影機，請檢查是否被其他程式佔用。")
-    exit()
-
-print("✅ 成功啟動！正在預覽中... 按下鍵盤上的 'q' 鍵可結束。")
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    h, w, _ = frame.shape
+# --- 3. 將原本的 while 迴圈邏輯包裝進 callback ---
+def video_frame_callback(frame):
+    # 將相機每一幀轉成 numpy 陣列
+    img = frame.to_ndarray(format="bgr24")
+    
+    h, w, _ = img.shape
     mask_resized = cv2.resize(overlay, (w, h))
 
-    # --- 3. 疊加濾鏡 ---
+    # --- 這裡完全搬移你原本成功的疊加邏輯 ---
     if mask_resized.shape[2] == 4: # PNG 有透明層
         alpha = mask_resized[:, :, 3] / 255.0
         overlay_color = mask_resized[:, :, :3]
-        # 進行 BGR 疊加
         for c in range(3):
-            frame[:, :, c] = (frame[:, :, c] * (1 - alpha) + overlay_color[:, :, c] * alpha).astype(np.uint8)
-    else: # 沒有透明層
-        frame = cv2.addWeighted(frame, 0.6, mask_resized[:, :, :3], 0.4, 0)
+            img[:, :, c] = (img[:, :, c] * (1 - alpha) + overlay_color[:, :, c] * alpha).astype(np.uint8)
+    else: # 沒有透明層 (JPG)
+        img = cv2.addWeighted(img, 0.6, mask_resized[:, :, :3], 0.4, 0)
 
-    # --- 4. 顯示視窗 ---
-    cv2.imshow('Art Filter', frame)
+    # 回傳處理好的畫面
+    return cv2.VideoFrame.from_ndarray(img, format="bgr24")
 
-    # 偵測按鍵
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+# --- 4. 啟動網頁串流 (取代 cv2.imshow) ---
+webrtc_streamer(
+    key="munch-filter",
+    mode=WebRtcMode.SENDRECV,
+    video_frame_callback=video_frame_callback,
+    # 手機連線必要的伺服器設定
+    rtc_configuration={
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+    },
+    media_stream_constraints={
+        "video": {"facingMode": "user"}, # 預設前鏡頭
+        "audio": False
+    },
+    async_processing=True, # 防止畫面卡住
+)
