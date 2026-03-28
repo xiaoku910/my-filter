@@ -4,59 +4,68 @@ import cv2
 import numpy as np
 import os
 
-# 1. 頁面標題
-st.set_page_config(page_title="大師濾鏡-手機同步版")
+# 1. 基本設定
+st.set_page_config(page_title="孟克濾鏡-雲端流暢版")
+st.title("🎨 藝術濾鏡測試中")
 
-# --- 2. 保留你最成功的圖片讀取邏輯 ---
-def imread_unicode(path):
-    try:
-        # 雲端環境也適用這種讀取方式，最保險
-        data = np.fromfile(path, dtype=np.uint8)
-        img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
-        return img
-    except Exception as e:
+# 2. 強化版圖片讀取 (加入錯誤檢查提示)
+@st.cache_resource
+def load_filter_image():
+    # 這裡直接讀取，不處理中文路徑，因為 GitHub 伺服器路徑是英文的
+    path = "mask.png" 
+    if not os.path.exists(path):
         return None
+    # 讀取並強制轉換為帶 Alpha 通道的內容
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    return img
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-mask_path = os.path.join(BASE_DIR, "mask.png")
-overlay = imread_unicode(mask_path)
+overlay = load_filter_image()
 
 if overlay is None:
-    st.error(f"❌ 找不到濾鏡檔案 mask.png")
-    st.stop()
+    st.error("❌ 找不到 mask.png！請確認檔案有跟 app.py 放在 GitHub 同一個資料夾。")
+else:
+    st.success("✅ 濾鏡素材讀取成功，請按下方 Start。")
 
-# --- 3. 將原本的 while 迴圈邏輯包裝進 callback ---
-def video_frame_callback(frame):
-    # 將相機每一幀轉成 numpy 陣列
+# 3. 影像處理邏輯 (優化效能，防止卡在第一幀)
+def transform(frame):
     img = frame.to_ndarray(format="bgr24")
     
-    h, w, _ = img.shape
-    mask_resized = cv2.resize(overlay, (w, h))
+    if overlay is not None:
+        # 取得目前相機畫面的寬高
+        h, w = img.shape[:2]
+        # 縮放濾鏡以匹配相機
+        mask_res = cv2.resize(overlay, (w, h))
 
-    # --- 這裡完全搬移你原本成功的疊加邏輯 ---
-    if mask_resized.shape[2] == 4: # PNG 有透明層
-        alpha = mask_resized[:, :, 3] / 255.0
-        overlay_color = mask_resized[:, :, :3]
-        for c in range(3):
-            img[:, :, c] = (img[:, :, c] * (1 - alpha) + overlay_color[:, :, c] * alpha).astype(np.uint8)
-    else: # 沒有透明層 (JPG)
-        img = cv2.addWeighted(img, 0.6, mask_resized[:, :, :3], 0.4, 0)
+        if mask_res.shape[2] == 4: # PNG 有透明層
+            alpha = mask_res[:, :, 3] / 255.0
+            overlay_rgb = mask_res[:, :, :3]
+            # 使用快速疊加法，避免逐像素迴圈
+            img = (img * (1.0 - alpha[:, :, np.newaxis]) + 
+                   overlay_rgb * alpha[:, :, np.newaxis]).astype(np.uint8)
+        else:
+            # 如果是 JPG
+            img = cv2.addWeighted(img, 0.5, mask_res[:, :, :3], 0.5, 0)
 
-    # 回傳處理好的畫面
     return cv2.VideoFrame.from_ndarray(img, format="bgr24")
 
-# --- 4. 啟動網頁串流 (取代 cv2.imshow) ---
+# 4. 啟動 WebRTC (關鍵參數調整)
 webrtc_streamer(
-    key="munch-filter",
+    key="munch-cloud-final",
     mode=WebRtcMode.SENDRECV,
-    video_frame_callback=video_frame_callback,
-    # 手機連線必要的伺服器設定
+    video_frame_callback=transform,
+    # 加入 STUN 伺服器
     rtc_configuration={
         "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
     },
+    # 限制解析度以提升順暢度 (非常重要！)
     media_stream_constraints={
-        "video": {"facingMode": "user"}, # 預設前鏡頭
+        "video": {
+            "width": {"ideal": 640},
+            "height": {"ideal": 480},
+            "frameRate": {"ideal": 15}
+        },
         "audio": False
     },
-    async_processing=True, # 防止畫面卡住
+    # 讓影像處理跟顯示分開，防止卡死
+    async_processing=True,
 )
