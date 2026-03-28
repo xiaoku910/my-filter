@@ -1,64 +1,64 @@
-import streamlit as st
-from streamlit_webrtc import webrtc_streamer, WebRtcMode
 import cv2
 import numpy as np
 import os
 
-st.set_page_config(page_title="最終完成版", layout="centered")
-
-# --- 1. 確保圖片能被讀取 (使用緩存避免重複讀取) ---
-@st.cache_resource
-def get_mask():
-    # 雲端環境路徑最穩定的寫法
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(current_dir, "mask.png")
-    
-    if not os.path.exists(path):
+# --- 1. 解決中文路徑讀取問題 ---
+def imread_unicode(path):
+    # 使用 numpy 讀取二進制數據，再解碼，這樣中文路徑就不會噴錯
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+        img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+        return img
+    except Exception as e:
+        print(f"讀取錯誤: {e}")
         return None
-        
-    # 用 OpenCV 讀取
-    mask = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-    return mask
 
-MASK_IMG = get_mask()
+# 定位檔案
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+mask_path = os.path.join(BASE_DIR, "mask.png")
 
-if MASK_IMG is None:
-    st.error("❌ 找不到 mask.png，請確認檔案已上傳至 GitHub 根目錄。")
-else:
-    st.success("✅ 濾鏡素材載入成功！")
+# 載入濾鏡
+overlay = imread_unicode(mask_path)
 
-# --- 2. 影像處理函式 (優化速度) ---
-def video_frame_callback(frame):
-    img = frame.to_ndarray(format="bgr24")
-    
-    if MASK_IMG is not None:
-        h, w = img.shape[:2]
-        # 縮放濾鏡
-        overlay = cv2.resize(MASK_IMG, (w, h))
-        
-        if overlay.shape[2] == 4: # PNG 透明通道處理
-            alpha = (overlay[:, :, 3] / 255.0)[:, :, np.newaxis]
-            img = (img * (1.0 - alpha) + overlay[:, :, :3] * alpha).astype(np.uint8)
-        else: # 如果是 JPG 或沒透明層
-            img = cv2.addWeighted(img, 0.5, overlay[:, :, :3], 0.5, 0)
-            
-    return cv2.VideoFrame.from_ndarray(img, format="bgr24")
+if overlay is None:
+    print(f"❌ 錯誤：找不到或無法開啟 {mask_path}")
+    print("請確認 mask.png 是否真的在該資料夾下面。")
+    exit()
 
-# --- 3. WebRTC 設定 (關鍵：解決卡頓) ---
-webrtc_streamer(
-    key="munch-final",
-    mode=WebRtcMode.SENDRECV,
-    rtc_configuration={
-        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-    },
-    video_frame_callback=video_frame_callback,
-    media_stream_constraints={
-        "video": {
-            "width": {"ideal": 480},  # 調低解析度保證順暢
-            "height": {"ideal": 360},
-            "frameRate": {"ideal": 15}
-        },
-        "audio": False
-    },
-    async_processing=True, # 必須開啟，否則畫面會卡在第一幀
-)
+# --- 2. 啟動相機 ---
+# 嘗試多個後端啟動相機，防止 FFMPEG 報錯
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW) 
+
+if not cap.isOpened():
+    print("❌ 錯誤：找不到攝影機，請檢查是否被其他程式佔用。")
+    exit()
+
+print("✅ 成功啟動！正在預覽中... 按下鍵盤上的 'q' 鍵可結束。")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    h, w, _ = frame.shape
+    mask_resized = cv2.resize(overlay, (w, h))
+
+    # --- 3. 疊加濾鏡 ---
+    if mask_resized.shape[2] == 4: # PNG 有透明層
+        alpha = mask_resized[:, :, 3] / 255.0
+        overlay_color = mask_resized[:, :, :3]
+        # 進行 BGR 疊加
+        for c in range(3):
+            frame[:, :, c] = (frame[:, :, c] * (1 - alpha) + overlay_color[:, :, c] * alpha).astype(np.uint8)
+    else: # 沒有透明層
+        frame = cv2.addWeighted(frame, 0.6, mask_resized[:, :, :3], 0.4, 0)
+
+    # --- 4. 顯示視窗 ---
+    cv2.imshow('Art Filter', frame)
+
+    # 偵測按鍵
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
